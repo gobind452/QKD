@@ -196,6 +196,7 @@ private:
 	vector<unordered_map<int,float>> parityEstimates;
 	vector<float> bitEstimates; // Not needed for hard decoding
 	float LLR; // Initial prob for soft decoding
+	vector<int> targetKey;
 public:
 	Matrix checkMatrix;
 	Matrix transposeCheckMatrix;
@@ -207,8 +208,8 @@ public:
 		this->transposeCheckMatrix = this->checkMatrix.getTranspose();
 		this->parityEstimates = vector<unordered_map<int,float>>(syndromeLength,unordered_map<int,float>());
 		this->bitEstimates = vector<float>();
+		this->targetKey = vector<int>(keyLength,0);
 	}
-
 	template <typename T>
 	void initKey(vector<T> key){
 		for(int i=0;i<keyLength;i++){
@@ -220,10 +221,15 @@ public:
 			allParityNodes[i] = static_cast<int>(syndrome[i]);
 		}
 	}
-
+	template <typename T>
+	void initTarget(vector<T> key){
+		for(int i=0;i<keyLength;i++){
+			targetKey[i] = static_cast<int>(key[i]);
+		}
+	}
 	void initSoft(float prob){ // Prob of an error
-		float zeroPriorLLR = log(prob/(1-prob)); // If bit is 0 then likelihood of 1 is prob
-		float onePriorLLR = log((1-prob)/prob);
+		float onePriorLLR = log(prob/(1-prob)); // If bit is 1 then likelihood of 0 is prob
+		float zeroPriorLLR = log((1-prob)/prob);
 		for(int i=0;i<keyLength;i++){
 			if(allBitNodes[i] == 1){
 				bitEstimates.push_back(onePriorLLR);
@@ -232,9 +238,8 @@ public:
 		}
 		this->LLR = zeroPriorLLR;
 	}
-
 	template <typename T>
-	void initSystem(vector<T> key,vector<int> syndrome,bool flag,float prob=0){
+	void initSystem(vector<T> key,vector<int> syndrome,bool flag,float prob=0,vector<T> target=vector<int>()){
 		this->initKey(key);
 		if(flag == 1){
 			this->initSoft(prob);
@@ -246,14 +251,18 @@ public:
 				parityEstimates[i][temp] = 0;
 			}
 		}
+		if(targetKey.size()>0){
+			initTarget(target);
+		}
 	}
-
 	bool checkSolved(bool flag){
 		if(flag == 0){
+			cout << "Hey" << endl;
 			for(int i=0;i<syndromeLength;i++){
 				int currSum = 0;
 				for(int j=0;j<transposeCheckMatrix.values[i].size();j++){
 					int temp = transposeCheckMatrix.values[i][j];
+					cout << allBitNodes[temp] << " " << endl;
 					currSum = currSum ^ static_cast<int>(allBitNodes[temp]);
 				}
 				if(currSum != allParityNodes[i]){
@@ -265,10 +274,10 @@ public:
 		for(int i=0;i<syndromeLength;i++){
 			int currSum = 0;
 			for(int j=0;j<transposeCheckMatrix.values[i].size();j++){
-				int temp = transposeCheckMatrix.values[i][j];
-				temp = bitEstimates[temp];
+				float temp = transposeCheckMatrix.values[i][j];
+				temp = bitEstimates[static_cast<int>(temp)];
 				int hardDecision = 0;
-				if(temp>0){
+				if(temp<=0){
 					hardDecision = 1;
 				}
 				currSum = currSum ^ hardDecision;
@@ -279,7 +288,6 @@ public:
 		}
 		return true;
 	}
-
 	void transferParityBit(bool flag){
 		if(flag == 0){
 			for(int i=0;i<syndromeLength;i++){
@@ -297,44 +305,53 @@ public:
 			return;
 		}
 		for(int i=0;i<syndromeLength;i++){
-			vector<int> tanhValues;
-			int zeroCount = 0;
-			float prod = 0;
+			vector<float> tanhValues; // Values to be sent to the corresponding bits
+			vector<int> signs; // Signs of the tanh values
+			int zeroCount = 0; // Number of zeros in the values
+			float logProd = 0; // LogProduct of the array
+			int signProd = 1;
 			for(int j=0;j<transposeCheckMatrix.values[i].size();j++){
 				int temp = transposeCheckMatrix.values[i][j];
 				float value = tanh((bitEstimates[temp]-parityEstimates[i][temp])/2); // LLR of the bit got by other check nodes
-				tanhValues.push_back(value);
-				if(value == 0){
+				tanhValues.push_back(abs(value)); // Push back the absolute value
+				if(value == 0){ // If it is zero
 					zeroCount++;
 				}
-				else prod = prod*value; // LogProduct of the array
+				else logProd = logProd + log(abs(value)); // LogProduct of the array
+				if(value>=0){
+					signs.push_back(1); // Store the sign of the tanh
+				}
+				else signs.push_back(-1);
+				signProd = signProd*signs[signs.size()-1];
 			}
 			for(int j=0;j<transposeCheckMatrix.values[i].size();j++){
-				if(transposeCheckMatrix.values[i].size() == 1){
-					tanhValues[j] = 0;
+				if(transposeCheckMatrix.values[i].size() == 1){ // This is the only connected bit
+					tanhValues[j] = 0; // No other bit to get information from
 				}
-				else if(zeroCount>1){ // There is one other zero
+				else if(zeroCount>1){ // There are two zeros
 					tanhValues[j] = 0; 
 				}
-				else if(zeroCount == 1 and tanhValues[j]!=0){
+				else if(zeroCount == 1 and tanhValues[j]!=0){ // There is one other zero
 					tanhValues[j] = 0;
 				}
-				else if(tanhValues[j] == 0){ // This is zero
-					tanhValues[j] = prod;
+				else if(tanhValues[j] == 0){ // This is the only zero
+					tanhValues[j] = signs[j]*exp(logProd);
 				}
 				else{
-					tanhValues[j] = prod/tanhValues[j]; 
+					tanhValues[j] = (signProd*signs[j])*exp(logProd-log(tanhValues[j])); 
 				}
 				int temp = transposeCheckMatrix.values[i][j];
 				parityEstimates[i][temp] = 2*atanh(tanhValues[j]);
+				if(allParityNodes[i] == 1){
+					parityEstimates[i][temp] = -1*parityEstimates[i][temp];
+				}
 				if(isinf(parityEstimates[i][temp]) or isnan(parityEstimates[i][temp])){
-					cout << parityEstimates[i][temp] <<  " " << tanhValues[j] << " " << prod << " " << bitEstimates[temp] << " " << zeroCount << endl;;
+					cout << parityEstimates[i][temp] <<  " " << tanhValues[j] << " " << logProd << " " << bitEstimates[temp] << " " << zeroCount << endl;;
 				}
 			}
 		}
 		return;
 	}
-
 	void updateBit(bool flag){
 		if(flag == 0){
 			for(int i=0;i<keyLength;i++){
@@ -355,6 +372,7 @@ public:
 			return;
 		}
 		for(int i=0;i<keyLength;i++){
+			float initial = bitEstimates[i];
 			bitEstimates[i] = 0;
 			for(int j=0;j<checkMatrix.values[i].size();j++){
 				int temp = checkMatrix.values[i][j];
@@ -364,21 +382,36 @@ public:
 				bitEstimates[i] = bitEstimates[i] - LLR;
 			}
 			else bitEstimates[i] = bitEstimates[i] + LLR;
+			if(initial*bitEstimates[i]<0){
+				cout << "Bit Flipped " << i << endl;
+			}
 		}
 	}
-
-	void decodeHard(int iterations){
+	void decode(bool flag,int iterations,bool targetEnabled=false){
+		if(flag == 0){
+			decodeHard(iterations,targetEnabled);
+			return;
+		}
+		decodeSoft(iterations,targetEnabled);
+	}
+	void decodeHard(int iterations,bool targetEnabled){
 		for(int iter=0;iter<iterations;iter++){
+			if(targetEnabled){
+				cout << "Current Errors to Target " << getErrorsToTarget(0) << endl;
+			} 
 			if(checkSolved(0) == true){
+				cout << "Solved" << endl;
 				return;
 			}
 			transferParityBit(0);
 			updateBit(0);
 		}
 	}
-
-	void decodeSoft(int iterations){
+	void decodeSoft(int iterations,bool targetEnabled){
 		for(int iter=0;iter<iterations;iter++){
+			if(targetEnabled){
+				cout << "Current Errors to Target " << getErrorsToTarget(1) << endl; 
+			}
 			if(checkSolved(1) == true){
 				cout << "Solved" << endl;
 				break;
@@ -387,14 +420,12 @@ public:
 			updateBit(1);
 		}
 		for(int i=0;i<keyLength;i++){
-			if(bitEstimates[i]>=0){
-				allBitNodes[i] = 1;
+			if(bitEstimates[i]>0){
+				allBitNodes[i] = 0;
 			}
-			else allBitNodes[i] = 0;
+			else allBitNodes[i] = 1;
 		}
 	}
-
-
 	vector<int> extractKey(bool flag){
 		vector<int> temp;
 		for(int i=0;i<keyLength;i++){
@@ -402,7 +433,29 @@ public:
 		}
 		return temp;
 	}
-}
+	int getErrorsToTarget(bool flag){
+		if(flag == 0){
+			int errors = 0;
+			for(int i=0;i<keyLength;i++){
+				if(allBitNodes[i]!=this->targetKey[i]){
+					errors++;
+				}
+			}
+			return errors;
+		}
+		int errors = 0;
+		for(int i=0;i<keyLength;i++){
+			int hardDecision = 0;
+			if(bitEstimates[i]<=0){
+				hardDecision = 1;
+			}
+			if(hardDecision!=this->targetKey[i]){
+				errors++;
+			}
+		}
+		return errors;
+	}
+};
 
 
 int getErrors(vector<int> aliceKey,vector<int> bobKey){
@@ -415,11 +468,12 @@ int getErrors(vector<int> aliceKey,vector<int> bobKey){
 
 
 int main(int argc,char** argv){
-	int keyLength = atoi(argv[0]);
-	float errorFraction = atoi(argv[1]);
-	float syndromeFraction = atoi(argv[2]);
-	float matrixDensity = atoi(argv[3]);
-	int flag = atoi(argv[4]);
+	int keyLength = atoi(argv[1]);
+	float errorFraction = atof(argv[2]);
+	float syndromeFraction = atof(argv[3]);
+	float matrixDensity = atof(argv[4]);
+	int flag = atoi(argv[5]);
+	int iterations = atoi(argv[6]);
 	int syndromeLength = int(syndromeFraction*keyLength);
 	vector<int> aliceKey;
 	vector<int> bobKey;
@@ -438,13 +492,24 @@ int main(int argc,char** argv){
 		}
 	}
 	int totalErrors = getErrors(aliceKey,bobKey);
+	cout << "Keys" << endl;
+	for(int i=0;i<keyLength;i++){
+		cout << aliceKey[i] << " " << bobKey[i] << endl;
+ 	}
 	vector<int> syndrome = vector<int>(syndromeLength,0);
 	TannerGraph tannerGraph = TannerGraph(keyLength,syndromeLength,matrixDensity);
 	multiply(aliceKey,syndrome,tannerGraph.checkMatrix);
-	tannerGraph.initSystem(bobKey,syndrome,flag,errorFraction);
+	cout << "Syndrome " << endl;
+	for(int i=0;i<syndromeLength;i++){
+		cout << syndrome[i] << endl;
+	}
+	tannerGraph.initSystem(bobKey,syndrome,flag,errorFraction,aliceKey);
 	cout << "Initial Errors " << totalErrors << endl;
-	tannerGraph.decodeHard(10);
-	bobKey = tannerGraph.extractKey();
+	tannerGraph.decode(flag,iterations,false);
+	bobKey = tannerGraph.extractKey(flag);
+	for(int i=0;i<keyLength;i++){
+		cout << aliceKey[i] << " " << bobKey[i] << endl;
+ 	}
 	cout << "Final Errors " << getErrors(aliceKey,bobKey) << endl;
 	return 0;
 }
